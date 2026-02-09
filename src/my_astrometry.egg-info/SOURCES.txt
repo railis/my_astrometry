@@ -12,6 +12,13 @@ src/my_astrometry.egg-info/dependency_links.txt
 src/my_astrometry.egg-info/entry_points.txt
 src/my_astrometry.egg-info/requires.txt
 src/my_astrometry.egg-info/top_level.txt
+src/my_astrometry/__pycache__/__init__.cpython-312.pyc
+src/my_astrometry/__pycache__/annotator.cpython-312.pyc
+src/my_astrometry/__pycache__/catalogs.cpython-312.pyc
+src/my_astrometry/__pycache__/cli.cpython-312.pyc
+src/my_astrometry/__pycache__/coordinates.cpython-312.pyc
+src/my_astrometry/__pycache__/setup_data.cpython-312.pyc
+src/my_astrometry/__pycache__/solver.cpython-312.pyc
 src/my_astrometry/data/constellation_names.json
 src/my_astrometry/data/constellations.json
 src/my_astrometry/data/messier.csv

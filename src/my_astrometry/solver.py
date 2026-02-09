@@ -1,12 +1,9 @@
 """Star detection and plate solving pipeline."""
 
 import math
-import os
 import pathlib
 import re
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from astropy.wcs import WCS
@@ -200,53 +197,28 @@ def solve(
 
         logging.getLogger().setLevel(logging.INFO)
 
-    # Parallel solve: split index files across threads, first match wins
-    n_workers = min(len(index_files), os.cpu_count() or 4)
+    solution_parameters = astrometry.SolutionParameters(
+        logodds_callback=lambda logodds_list: (
+            astrometry.Action.STOP
+            if logodds_list[0] > 20.0
+            else astrometry.Action.CONTINUE
+        ),
+    )
 
-    # Distribute index files round-robin so each worker gets a mix of scales
-    groups: list[list[pathlib.Path]] = [[] for _ in range(n_workers)]
-    for i, f in enumerate(index_files):
-        groups[i % n_workers].append(f)
-
-    cancel_event = threading.Event()
-    best_result: list = []  # [solution, match] — shared across threads
-    result_lock = threading.Lock()
-
-    def _solve_group(group_files: list[pathlib.Path]):
-        """Solve with a subset of index files. Stops early if another thread found a match."""
-        solution_parameters = astrometry.SolutionParameters(
-            logodds_callback=lambda logodds_list: (
-                astrometry.Action.STOP
-                if cancel_event.is_set() or logodds_list[0] > 100.0
-                else astrometry.Action.CONTINUE
-            ),
-        )
-        with astrometry.Solver(group_files) as solver:
-            solution = solver.solve(
-                stars=stars,
-                size_hint=size_hint,
-                position_hint=position_hint,
-                solution_parameters=solution_parameters,
-            )
-        if solution.has_match():
-            with result_lock:
-                match = solution.best_match()
-                if not best_result or match.logodds > best_result[1].logodds:
-                    best_result.clear()
-                    best_result.extend([solution, match])
-            cancel_event.set()
-
-    print(f"  Plate solving ({len(index_files)} index files, {n_workers} threads)...")
+    print(f"  Plate solving ({len(index_files)} index files)...")
     t0 = time.monotonic()
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_solve_group, g) for g in groups]
-        for future in as_completed(futures):
-            future.result()  # propagate exceptions
+    with astrometry.Solver(index_files) as solver:
+        solution = solver.solve(
+            stars=stars,
+            size_hint=size_hint,
+            position_hint=position_hint,
+            solution_parameters=solution_parameters,
+        )
 
     solve_time = time.monotonic() - t0
 
-    if not best_result:
+    if not solution.has_match():
         print(f"  Failed after {solve_time:.1f}s")
         raise RuntimeError(
             "Plate solving failed — no match found. "
@@ -254,7 +226,7 @@ def solve(
             "or position hints (--ra, --dec, --radius)."
         )
 
-    match = best_result[1]
+    match = solution.best_match()
     wcs = match.astropy_wcs()
 
     total_time = time.monotonic() - t_total

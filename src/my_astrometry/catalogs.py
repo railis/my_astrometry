@@ -3,6 +3,7 @@
 import csv
 import json
 import pathlib
+import warnings
 
 import numpy as np
 from astropy.coordinates import SkyCoord
@@ -224,8 +225,12 @@ def filter_objects_in_fov(
     decs = np.array([o["dec_deg"] for o in objects])
     coords = SkyCoord(ra=ras * u.deg, dec=decs * u.deg)
 
-    # Convert to pixel coordinates
-    pixels = wcs.world_to_pixel(coords)
+    # Convert to pixel coordinates (suppress convergence warnings for
+    # objects far from the image center — results will be NaN, filtered below)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        warnings.simplefilter("ignore", RuntimeWarning)
+        pixels = wcs.world_to_pixel(coords)
     xs, ys = pixels[0], pixels[1]
 
     # Filter to those within image bounds (with margin)
@@ -316,13 +321,22 @@ def load_constellation_names() -> dict[str, str]:
 def get_constellation_lines_in_fov(
     wcs: WCS, width: int, height: int
 ) -> list[dict]:
-    """Get constellation line segments visible in the FOV.
+    """Get constellation line segments near the FOV in sky coordinates.
+
+    Returns RA/Dec coordinates (not pixel coords).  The annotator uses WCSAxes
+    to project and clip these onto the image automatically.
 
     Returns:
-        List of dicts with 'abbr', 'name', and 'segments' (pixel coordinates).
+        List of dicts with 'abbr', 'name', and 'segments' (RA/Dec in degrees).
     """
     all_lines = load_constellation_lines()
     names = load_constellation_names()
+
+    # Compute field center and angular radius for pre-filtering
+    center_sky = wcs.pixel_to_world(width / 2, height / 2)
+    corner_sky = wcs.pixel_to_world(0, 0)
+    fov_radius_deg = center_sky.separation(corner_sky).deg
+    max_angular_dist = fov_radius_deg * 2.0
 
     visible_constellations = []
 
@@ -335,29 +349,15 @@ def get_constellation_lines_in_fov(
             coord1 = SkyCoord(ra=ra1 * u.deg, dec=dec1 * u.deg)
             coord2 = SkyCoord(ra=ra2 * u.deg, dec=dec2 * u.deg)
 
-            px1 = wcs.world_to_pixel(coord1)
-            px2 = wcs.world_to_pixel(coord2)
-
-            x1, y1 = float(px1[0]), float(px1[1])
-            x2, y2 = float(px2[0]), float(px2[1])
-
-            if any(np.isnan(v) for v in [x1, y1, x2, y2]):
+            # Only include segments where both endpoints are near the FOV
+            if (center_sky.separation(coord1).deg > max_angular_dist
+                    or center_sky.separation(coord2).deg > max_angular_dist):
                 continue
 
-            # Check if either endpoint is in the image (with generous margin)
-            margin = max(width, height) * 0.5
-            in_fov = (
-                (-margin <= x1 <= width + margin and -margin <= y1 <= height + margin)
-                or (-margin <= x2 <= width + margin and -margin <= y2 <= height + margin)
-            )
-
-            # Also reject lines that span too many pixels (RA wrap-around artifact)
-            line_length = np.hypot(x2 - x1, y2 - y1)
-            if line_length > max(width, height) * 3:
-                continue
-
-            if in_fov:
-                visible_segments.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+            visible_segments.append({
+                "ra1": ra1, "dec1": dec1,
+                "ra2": ra2, "dec2": dec2,
+            })
 
         if visible_segments:
             visible_constellations.append({

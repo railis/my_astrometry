@@ -1,0 +1,6 @@
+astrometry>=4.0
+sep-pjw>=1.2
+astropy>=5.0
+numpy>=1.24
+Pillow>=9.0
+matplotlib>=3.6

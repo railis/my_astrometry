@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-astrometry"
+version = "0.1.0"
+description = "Local offline astrometry plate solver CLI with annotation"
+requires-python = ">=3.10"
+dependencies = [
+    "astrometry>=4.0",
+    "sep-pjw>=1.2",
+    "astropy>=5.0",
+    "numpy>=1.24",
+    "Pillow>=9.0",
+    "matplotlib>=3.6",
+]
+
+[project.scripts]
+my-astrometry = "my_astrometry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+my_astrometry = ["data/*.csv", "data/*.json"]

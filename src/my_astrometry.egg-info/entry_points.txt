@@ -1,0 +1,2 @@
+[console_scripts]
+my-astrometry = my_astrometry.cli:main

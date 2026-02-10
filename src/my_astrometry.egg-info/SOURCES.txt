@@ -1,3 +1,6 @@
+CLAUDE.md
+LICENSE
+README.md
 pyproject.toml
 src/my_astrometry/__init__.py
 src/my_astrometry/annotator.py
@@ -6,6 +9,7 @@ src/my_astrometry/cli.py
 src/my_astrometry/coordinates.py
 src/my_astrometry/setup_data.py
 src/my_astrometry/solver.py
+src/my_astrometry/wcs_exif.py
 src/my_astrometry.egg-info/PKG-INFO
 src/my_astrometry.egg-info/SOURCES.txt
 src/my_astrometry.egg-info/dependency_links.txt

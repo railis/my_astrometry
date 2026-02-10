@@ -3,9 +3,11 @@ Name: my-astrometry
 Version: 0.1.0
 Summary: Local offline astrometry plate solver CLI with annotation
 Requires-Python: >=3.10
+License-File: LICENSE
 Requires-Dist: astrometry>=4.0
 Requires-Dist: sep-pjw>=1.2
 Requires-Dist: astropy>=5.0
 Requires-Dist: numpy>=1.24
 Requires-Dist: Pillow>=9.0
 Requires-Dist: matplotlib>=3.6
+Dynamic: license-file

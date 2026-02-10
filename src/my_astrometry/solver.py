@@ -10,11 +10,31 @@ from astropy.wcs import WCS
 from PIL import Image
 
 
-def _index_scale_number(path: pathlib.Path) -> int | None:
-    """Extract the scale number from an index filename like index-4112.fits."""
-    m = re.search(r"index-\d\d(\d\d)\.fits", path.name)
+# Quad angular size midpoints (arcmin) for each series and scale
+_QUAD_ARCMIN: dict[tuple[str, int], float] = {}
+
+# 4100 series: quad_arcmin = 30 * 2^((scale-10)/2)
+for _s in range(7, 20):
+    _QUAD_ARCMIN[("4100", _s)] = 30.0 * (2 ** ((_s - 10) / 2.0))
+
+# 5200 series: known angular ranges per scale
+_5200_RANGES = {
+    0: (2.0, 2.8), 1: (2.8, 4.0), 2: (4.0, 5.6), 3: (5.6, 8.0),
+    4: (8.0, 11.0), 5: (11.0, 16.0), 6: (16.0, 22.0),
+}
+for _s, (_lo, _hi) in _5200_RANGES.items():
+    _QUAD_ARCMIN[("5200", _s)] = (_lo + _hi) / 2.0
+
+
+def _parse_index_file(path: pathlib.Path) -> tuple[str, int] | None:
+    """Return (series, scale) for an index file, or None if unrecognized."""
+    name = path.name
+    m = re.match(r"index-41(\d{2})\.fits$", name)
     if m:
-        return int(m.group(1))
+        return ("4100", int(m.group(1)))
+    m = re.match(r"index-52(\d{2})-\d{2}\.fits$", name)
+    if m:
+        return ("5200", int(m.group(1)))
     return None
 
 
@@ -25,18 +45,13 @@ def _filter_index_files(
     scale_low: float | None,
     scale_high: float | None,
 ) -> list[pathlib.Path]:
-    """Pre-filter index files to only those relevant for the given scale range.
-
-    Each 4100-series index at scale N covers quads of angular size ~30*sqrt(2)^(N-10) arcmin.
-    We keep only index files whose quad scale overlaps with the expected image FOV.
-    """
+    """Pre-filter index files to only those whose quad scale overlaps the expected FOV."""
     if scale_low is None and scale_high is None:
         return index_files
 
     lo = scale_low or 0.1
     hi = scale_high or 1000.0
 
-    # Image FOV range in arcmin for the given plate scale bounds
     diag_px = math.hypot(width, height)
     short_px = min(width, height)
 
@@ -46,20 +61,57 @@ def _filter_index_files(
 
     filtered = []
     for f in index_files:
-        scale_n = _index_scale_number(f)
-        if scale_n is None:
-            # Can't determine scale — keep it to be safe
+        parsed = _parse_index_file(f)
+        if parsed is None:
+            filtered.append(f)  # Unknown format — keep to be safe
+            continue
+        quad_arcmin = _QUAD_ARCMIN.get(parsed)
+        if quad_arcmin is None:
             filtered.append(f)
             continue
-        # Approximate quad angular size for this scale
-        quad_arcmin = 30.0 * (2 ** ((scale_n - 10) / 2.0))
         if min_quad_arcmin <= quad_arcmin <= max_quad_arcmin:
             filtered.append(f)
 
-    # If filtering removed everything, fall back to all files
     if not filtered:
         return index_files
     return filtered
+
+
+def estimate_plate_scale_from_exif(
+    image_path: pathlib.Path,
+) -> tuple[float, float] | None:
+    """Estimate plate scale range from EXIF data.
+
+    Returns (scale_low, scale_high) in arcsec/pixel, or None if insufficient data.
+    """
+    img = Image.open(image_path)
+    exif = img.getexif()
+    if not exif:
+        return None
+
+    width, height = img.size
+
+    # Method 1: FocalLength + FocalPlaneXResolution (most precise)
+    focal_length = exif.get(37386)  # FocalLength in mm
+    fp_x_res = exif.get(41486)  # FocalPlaneXResolution
+    fp_res_unit = exif.get(41488)  # FocalPlaneResolutionUnit
+
+    if focal_length and fp_x_res and fp_res_unit:
+        fl_mm = float(focal_length)
+        unit_to_mm = {2: 25.4, 3: 10.0, 4: 1.0, 5: 0.001}
+        if fl_mm > 0 and fp_res_unit in unit_to_mm:
+            pixel_size_mm = unit_to_mm[fp_res_unit] / float(fp_x_res)
+            plate_scale = 206.265 * pixel_size_mm / fl_mm  # arcsec/pixel
+            return (plate_scale * 0.7, plate_scale * 1.3)
+
+    # Method 2: FocalLengthIn35mmFilm (less precise but widely available)
+    fl_35mm = exif.get(41989)  # FocalLengthIn35mmFilm in mm
+    if fl_35mm and int(fl_35mm) > 0:
+        fov_h_rad = 2 * math.atan(18.0 / int(fl_35mm))
+        plate_scale = math.degrees(fov_h_rad) * 3600.0 / width  # arcsec/pixel
+        return (plate_scale * 0.6, plate_scale * 1.5)
+
+    return None
 
 
 def load_image(image_path: str | pathlib.Path) -> np.ndarray:
@@ -114,6 +166,8 @@ def solve(
     radius_hint: float | None = None,
     max_stars: int = 200,
     verbose: bool = False,
+    parity: str = "both",
+    use_exif: bool = True,
 ) -> tuple[WCS, dict]:
     """Plate-solve an image.
 
@@ -127,6 +181,8 @@ def solve(
         radius_hint: Search radius in degrees (requires ra_hint and dec_hint).
         max_stars: Maximum number of stars to detect.
         verbose: Print progress info.
+        parity: Image parity - "both", "normal", or "flip".
+        use_exif: Try to auto-detect plate scale from EXIF data.
 
     Returns:
         Tuple of (WCS object, metadata dict with center_ra, center_dec, scale, logodds).
@@ -161,6 +217,13 @@ def solve(
         raise RuntimeError("No stars detected in the image.")
     print(f"  Found {len(stars)} stars ({time.monotonic() - t0:.1f}s)")
 
+    # Auto-detect plate scale from EXIF if no explicit scale hints given
+    if use_exif and scale_low is None and scale_high is None:
+        exif_scale = estimate_plate_scale_from_exif(image_path)
+        if exif_scale is not None:
+            scale_low, scale_high = exif_scale
+            print(f"  EXIF auto-detected scale: {scale_low:.2f}-{scale_high:.2f} arcsec/px")
+
     # Build hints
     size_hint = None
     if scale_low is not None or scale_high is not None:
@@ -189,15 +252,26 @@ def solve(
     all_count = len(index_files)
     index_files = _filter_index_files(index_files, width, height, scale_low, scale_high)
     if len(index_files) < all_count:
-        scales = sorted(s for f in index_files if (s := _index_scale_number(f)) is not None)
-        print(f"  Using {len(index_files)}/{all_count} index files (scales {min(scales)}-{max(scales)})")
+        parsed = [_parse_index_file(f) for f in index_files]
+        series_counts = {}
+        for p in parsed:
+            if p:
+                series_counts[p[0]] = series_counts.get(p[0], 0) + 1
+        parts = [f"{count} {series}" for series, count in sorted(series_counts.items())]
+        print(f"  Using {len(index_files)}/{all_count} index files ({', '.join(parts)})")
 
     if verbose:
         import logging
 
         logging.getLogger().setLevel(logging.INFO)
 
+    parity_map = {
+        "both": astrometry.Parity.BOTH,
+        "normal": astrometry.Parity.NORMAL,
+        "flip": astrometry.Parity.FLIP,
+    }
     solution_parameters = astrometry.SolutionParameters(
+        parity=parity_map[parity],
         logodds_callback=lambda logodds_list: (
             astrometry.Action.STOP
             if logodds_list[0] > 20.0

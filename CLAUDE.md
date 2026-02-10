@@ -17,8 +17,8 @@ uv pip install -e .
 
 # Run the CLI
 my-astrometry setup              # One-time: downloads ~360MB of index files + OpenNGC catalog to ~/.my_astrometry
-my-astrometry solve image.jpg    # Plate-solve and annotate an image
-my-astrometry solve image.jpg --no-annotate  # Solve only, print coordinates
+my-astrometry solve image.jpg    # Plate-solve and save WCS solution to image EXIF
+my-astrometry annotate image.jpg # Annotate a solved image with catalog objects and constellations
 ```
 
 No test suite, linter, or formatter is configured.
@@ -27,13 +27,18 @@ No test suite, linter, or formatter is configured.
 
 Pipeline: **Image → Star Detection → Plate Solving → Coordinate Extraction → Catalog Matching → Annotation**
 
-### Data flow through `cli.py _cmd_solve()`
+### Data flow
 
-1. `solver.solve()` — loads image via Pillow, detects stars with `sep` (Source Extractor), runs `astrometry.Solver` to get WCS solution
+**`my-astrometry solve`** (`cli.py _cmd_solve()`):
+1. `solver.solve()` — loads image via Pillow, detects stars with `sep`, runs `astrometry.Solver` to get WCS solution
 2. `coordinates.get_field_info()` — extracts center RA/Dec, FOV, plate scale from WCS
-3. `catalogs.get_catalog_objects()` — loads Messier (bundled CSV) + OpenNGC (downloaded CSV), filters to objects in FOV using `wcs.world_to_pixel()`, returns pixel coords
-4. `catalogs.get_constellation_lines_in_fov()` — loads bundled constellation JSON, projects line segments to pixel coords
-5. `annotator.create_annotated_image()` — renders overlay on original image using matplotlib (plain axes, not WCSAxes)
+3. `wcs_exif.save_solution()` — persists WCS + metadata to image EXIF
+
+**`my-astrometry annotate`** (`cli.py _cmd_annotate()`):
+1. `wcs_exif.load_solution()` — reads WCS + metadata from image EXIF
+2. `catalogs.get_catalog_objects()` — loads Messier (bundled CSV) + OpenNGC (downloaded CSV), filters to objects in FOV using `wcs.world_to_pixel()`, returns pixel coords
+3. `catalogs.get_constellation_lines_in_fov()` — loads bundled constellation JSON, projects line segments to pixel coords
+4. `annotator.create_annotated_image()` — renders overlay on original image using matplotlib (plain axes, not WCSAxes)
 
 ### Key design decisions
 
@@ -49,4 +54,5 @@ Pipeline: **Image → Star Detection → Plate Solving → Coordinate Extraction
 - **`solver.py`**: Star detection (`sep.Background` → `sep.extract`), plate solving (`astrometry.Solver`). Returns `(WCS, metadata_dict)`.
 - **`coordinates.py`**: Pure WCS → human-readable coordinate extraction (center, corners, FOV, plate scale).
 - **`catalogs.py`**: Loads/filters Messier, OpenNGC, constellation data. `lookup_object()` resolves names (M42, "orion nebula", NGC1976) to RA/Dec. `filter_objects_in_fov()` does bulk WCS projection.
+- **`wcs_exif.py`**: Serializes WCS header + solve metadata as JSON into EXIF UserComment (tag 0x9286). Functions: `save_solution()`, `load_solution()`, `has_solution()`.
 - **`annotator.py`**: Matplotlib rendering. Object circles sized by real angular extent via plate scale. Prominence (alpha, stroke, font) scaled by magnitude.

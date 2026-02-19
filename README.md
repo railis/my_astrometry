@@ -108,11 +108,12 @@ WCS solution saved to EXIF in photo.jpg
 
 #### Solving hints
 
-Providing hints dramatically speeds up solving. Without hints, the solver must search the entire sky at all scales — with good hints, solving typically completes in 1-3 seconds.
+Providing hints dramatically speeds up solving. Without hints, the solver must search the entire sky at all scales — with good hints, solving typically completes in under a second.
 
 | Option | Description |
 |--------|-------------|
-| `--object NAME` | Search near a named object. Accepts Messier names (`m42`, `M31`), NGC/IC numbers (`NGC1976`, `IC434`), or common names (`"orion nebula"`, `"andromeda galaxy"`). Automatically sets RA/Dec/radius hints |
+| `--object NAME [PCT%]` | Search near a named object. Accepts Messier names (`m42`, `M31`), NGC/IC numbers (`NGC1976`, `IC434`), or common names (`"orion nebula"`, `"andromeda galaxy"`). Sets position hint automatically. Optionally add a percentage to indicate how much of the frame the object fills — this derives a plate scale hint and tighter search radius from the object's known angular size |
+| `--focal-length MM` | 35mm full-frame equivalent focal length in mm. Derives plate scale with 20% margin. Works with resized/cropped images since it doesn't depend on sensor pixel size |
 | `--ra DEGREES` | Right ascension hint in degrees (0-360). Use together with `--dec` |
 | `--dec DEGREES` | Declination hint in degrees (-90 to +90). Use together with `--ra` |
 | `--radius DEGREES` | Search radius around the RA/Dec hint (default: 10 degrees when `--object` is used) |
@@ -122,18 +123,32 @@ Providing hints dramatically speeds up solving. Without hints, the solver must s
 **Examples:**
 
 ```bash
-# Search near the Orion Nebula
+# Search near the Orion Nebula (position hint only)
 my-astrometry solve photo.jpg --object m42
+
+# Object fills ~50% of the frame — derives both position and scale hints
+my-astrometry solve photo.jpg --object m45 50%
+
+# Object is a close-up larger than the frame
+my-astrometry solve photo.jpg --object m31 200%
+
+# Multi-word name with percentage
+my-astrometry solve photo.jpg --object "orion nebula" 20%
+
+# Know your focal length (35mm equivalent) — great for resized images
+my-astrometry solve photo.jpg --focal-length 500
+
+# Combine focal length with object for fastest solving
+my-astrometry solve photo.jpg --object m42 --focal-length 200
 
 # Search near specific coordinates with a tight radius
 my-astrometry solve photo.jpg --ra 83.8 --dec -5.4 --radius 5
 
-# Constrain the plate scale (useful for known optical setups)
+# Exact plate scale (useful for known optical setups)
 my-astrometry solve photo.jpg --scale-low 1.0 --scale-high 2.0
-
-# Combine hints for fastest solving
-my-astrometry solve photo.jpg --object m42 --scale-low 1.0 --scale-high 2.0
 ```
+
+**How `--object PCT%` works:** The percentage indicates roughly how much of the frame's shortest dimension the object fills. The solver uses the object's catalog angular size to derive a plate scale estimate with adaptive margins — tighter for confident estimates (50-100%), wider for small objects (<20%) or close-ups (>100%) where it's harder to judge. Explicit `--scale-low`/`--scale-high` or `--focal-length` always override the percentage-derived scale.
 
 #### Advanced options
 
@@ -200,10 +215,11 @@ Object circles are sized proportionally to their real angular extent using the i
 ## How it works
 
 1. **Star Detection** — SEP (Source Extractor Python) subtracts the sky background and identifies point sources, returning pixel coordinates sorted by brightness
-2. **Plate Solving** — the detected star pattern is matched against pre-computed quad index files using the astrometry.net solver, yielding a WCS (World Coordinate System) transformation
-3. **WCS Persistence** — the WCS solution is serialized as JSON and stored in the image's EXIF `UserComment` tag, enabling annotation without re-solving
-4. **Catalog Matching** — Messier, NGC, and IC catalog positions are projected through the WCS to determine which objects fall within the image's field of view
-5. **Annotation Rendering** — matplotlib renders constellation lines, object labels, and a coordinate grid as an overlay on the original image
+2. **Index File Prioritization** — index files are sorted to try the most likely matches first: scales are ordered middle-out from the most common focal lengths (85-600mm), and sky regions are prioritized by deep-sky object density (Sagittarius, Orion, Virgo first). With `--workers`, files are distributed round-robin from this priority-sorted list across parallel solver processes
+3. **Plate Solving** — the detected star pattern is matched against pre-computed quad index files using the astrometry.net solver, yielding a WCS (World Coordinate System) transformation
+4. **WCS Persistence** — the WCS solution is serialized as JSON and stored in the image's EXIF `UserComment` tag, enabling annotation without re-solving
+5. **Catalog Matching** — Messier, NGC, and IC catalog positions are projected through the WCS to determine which objects fall within the image's field of view
+6. **Annotation Rendering** — matplotlib renders constellation lines, object labels, and a coordinate grid as an overlay on the original image
 
 ## Dependencies
 

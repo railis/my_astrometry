@@ -26,3 +26,4 @@ src/my_astrometry/__pycache__/solver.cpython-312.pyc
 src/my_astrometry/data/constellation_names.json
 src/my_astrometry/data/constellations.json
 src/my_astrometry/data/messier.csv
+src/my_astrometry/data/tile_priority.json

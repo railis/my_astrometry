@@ -58,9 +58,11 @@ def main() -> None:
     )
     solve_parser.add_argument(
         "--object",
-        type=str,
+        nargs="+",
         default=None,
-        help="Object name to center search on (e.g., m42, NGC1976, 'orion nebula').",
+        metavar="TOKEN",
+        help="Object name with optional frame fill percentage, e.g. 'm42 20%%'. "
+             "Sets position hint; with percentage also derives plate scale hint.",
     )
     solve_parser.add_argument(
         "--scale-low",
@@ -73,6 +75,15 @@ def main() -> None:
         type=float,
         default=None,
         help="Upper bound of plate scale in arcsec/pixel.",
+    )
+    solve_parser.add_argument(
+        "--focal-length",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="35mm full-frame equivalent focal length in mm. "
+             "Derives plate scale hint with 20%% margin. "
+             "Overridden by explicit --scale-low/--scale-high.",
     )
     solve_parser.add_argument(
         "--ra",
@@ -208,20 +219,51 @@ def _cmd_solve(args: argparse.Namespace) -> None:
         print(f"Error: Image not found: {args.image}", file=sys.stderr)
         sys.exit(1)
 
-    # Resolve --object to RA/Dec hints
+    # Resolve hints
     ra_hint = args.ra
     dec_hint = args.dec
     radius_hint = args.radius
+    scale_low = args.scale_low
+    scale_high = args.scale_high
+
+    # Derive scale from 35mm-equivalent focal length
+    if args.focal_length is not None and scale_low is None and scale_high is None:
+        import math
+        from PIL import Image
+
+        fl = args.focal_length
+        img = Image.open(args.image)
+        img_w, img_h = img.size
+        img.close()
+
+        fov_h_rad = 2 * math.atan(18.0 / fl)  # 35mm half-frame = 18mm
+        plate_scale = math.degrees(fov_h_rad) * 3600.0 / img_w
+        scale_low = plate_scale * 0.8
+        scale_high = plate_scale * 1.2
+        print(f"  Focal length {fl:.0f}mm (FF equiv): scale {scale_low:.2f}-{scale_high:.2f} arcsec/px")
 
     if args.object:
+        tokens = args.object
+        object_pct = None
+
+        # Check if last token is a percentage like "20%" or "200%"
+        if len(tokens) >= 2 and tokens[-1].endswith("%"):
+            try:
+                object_pct = float(tokens[-1][:-1])
+                object_name = " ".join(tokens[:-1])
+            except ValueError:
+                object_name = " ".join(tokens)
+        else:
+            object_name = " ".join(tokens)
+
         from my_astrometry.catalogs import lookup_object
 
         openngc_path = get_openngc_path(args.data_dir)
-        result = lookup_object(args.object, openngc_path=openngc_path)
+        result = lookup_object(object_name, openngc_path=openngc_path)
         if result is None:
-            print(f"Error: Unknown object '{args.object}'.", file=sys.stderr)
+            print(f"Error: Unknown object '{object_name}'.", file=sys.stderr)
             sys.exit(1)
-        obj_ra, obj_dec, obj_display = result
+        obj_ra, obj_dec, obj_display, obj_size_arcmin = result
         print(f"Object: {obj_display} (RA={obj_ra:.4f}, Dec={obj_dec:.4f})")
         if ra_hint is None:
             ra_hint = obj_ra
@@ -230,14 +272,62 @@ def _cmd_solve(args: argparse.Namespace) -> None:
         if radius_hint is None:
             radius_hint = 10.0
 
+        # Derive plate scale and tighter radius from object size + percentage
+        if object_pct is not None and obj_size_arcmin is not None and obj_size_arcmin > 0:
+            import math
+            from PIL import Image
+
+            img = Image.open(args.image)
+            img_w, img_h = img.size
+            img.close()
+
+            obj_size_arcsec = obj_size_arcmin * 60.0
+            short_px = min(img_w, img_h)
+            obj_pixels = (object_pct / 100.0) * short_px
+
+            if obj_pixels > 0:
+                plate_scale = obj_size_arcsec / obj_pixels
+
+                if args.scale_low is None and args.scale_high is None:
+                    # Non-linear margins: confidence peaks at 50-100%,
+                    # drops for tiny objects (<50%) and close-ups (>100%)
+                    if object_pct <= 50:
+                        confidence = object_pct / 50.0
+                    elif object_pct <= 100:
+                        confidence = 1.0
+                    else:
+                        confidence = max(0.0, 1.0 - (object_pct - 100) / 150.0)
+                    margin_low = 0.3 + 0.4 * confidence
+                    margin_high = 3.0 - 1.5 * confidence
+                    scale_low = plate_scale * margin_low
+                    scale_high = plate_scale * margin_high
+                    print(
+                        f"  Derived scale: {scale_low:.2f}-{scale_high:.2f} arcsec/px "
+                        f"(from {obj_size_arcmin:.1f}' object at {object_pct:.0f}%)"
+                        )
+                else:
+                    plate_scale = None
+
+                if plate_scale is not None and args.radius is None:
+                    fov_diag_deg = plate_scale * math.hypot(img_w, img_h) / 3600.0
+                    derived_radius = fov_diag_deg / 2.0 * 1.5
+                    radius_hint = derived_radius
+                    print(f"  Derived search radius: {derived_radius:.1f} deg")
+
+        elif object_pct is not None and (obj_size_arcmin is None or obj_size_arcmin <= 0):
+            print(
+                f"  Warning: No angular size known for {obj_display}; "
+                f"ignoring {object_pct:.0f}% hint (position-only)."
+            )
+
     # Solve
     print(f"Solving: {args.image}")
     try:
         wcs, metadata = solve(
             image_path=args.image,
             index_dir=get_index_dir(args.data_dir),
-            scale_low=args.scale_low,
-            scale_high=args.scale_high,
+            scale_low=scale_low,
+            scale_high=scale_high,
             ra_hint=ra_hint,
             dec_hint=dec_hint,
             radius_hint=radius_hint,

@@ -78,6 +78,79 @@ def _filter_index_files(
     return filtered
 
 
+def _parse_5200_tile(path: pathlib.Path) -> int | None:
+    """Extract healpix tile number from a 5200-series filename, or None."""
+    m = re.match(r"index-52\d{2}-(\d{2})\.fits$", path.name)
+    return int(m.group(1)) if m else None
+
+
+# Tile priority: loaded once from bundled JSON
+_TILE_PRIORITY: dict[int, int] | None = None
+
+
+def _get_tile_priority() -> dict[int, int]:
+    """Load tile priority mapping {tile_number: rank} from bundled JSON."""
+    global _TILE_PRIORITY
+    if _TILE_PRIORITY is None:
+        import json
+        priority_path = pathlib.Path(__file__).parent / "data" / "tile_priority.json"
+        if priority_path.exists():
+            with open(priority_path) as f:
+                data = json.load(f)
+            _TILE_PRIORITY = {tile: rank for rank, tile in enumerate(data["tile_order"])}
+        else:
+            _TILE_PRIORITY = {}
+    return _TILE_PRIORITY
+
+
+def _sort_index_files_by_priority(index_files: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Sort index files for fastest solving of typical astrophotography.
+
+    Two priority axes:
+    1. Scale: middle-out from the most common focal lengths (85-600mm FF).
+       4100 center=12 (60' quads), 5200 center=4 (8-11' quads).
+    2. Sky region: object-dense healpix tiles first (from tile_priority.json).
+
+    4100 files (all-sky) come first, sorted by scale priority.
+    5200 files follow, sorted by tile priority then scale priority.
+    """
+    tile_priority = _get_tile_priority()
+
+    # Middle-out scale ordering: distance from the "sweet spot"
+    # 4100 scales 7-19: center at 12, order: 12,11,13,10,14,9,15,8,16,7,17,18,19
+    # 5200 scales 0-6:  center at 4,  order: 4,3,5,2,6,1,0
+    _4100_CENTER = 12
+    _5200_CENTER = 4
+
+    files_4100 = []
+    files_5200 = []
+    files_other = []
+
+    for f in index_files:
+        parsed = _parse_index_file(f)
+        if parsed is None:
+            files_other.append(f)
+        elif parsed[0] == "4100":
+            files_4100.append(f)
+        else:
+            files_5200.append(f)
+
+    # Sort 4100 by distance from center scale (middle-out)
+    files_4100.sort(key=lambda f: (
+        abs((_parse_index_file(f)[1] if _parse_index_file(f) else 0) - _4100_CENTER),
+        _parse_index_file(f)[1] if _parse_index_file(f) else 0,
+    ))
+
+    # Sort 5200: primary = tile priority, secondary = scale distance from center
+    npix = max(tile_priority.values(), default=0) + 1 if tile_priority else 0
+    files_5200.sort(key=lambda f: (
+        tile_priority.get(_parse_5200_tile(f) or -1, npix),
+        abs((_parse_index_file(f)[1] if _parse_index_file(f) else 0) - _5200_CENTER),
+    ))
+
+    return files_4100 + files_5200 + files_other
+
+
 def estimate_plate_scale_from_exif(
     image_path: pathlib.Path,
 ) -> tuple[float, float] | None:
@@ -379,16 +452,17 @@ def solve(
     if size_hint_args or position_hint_args:
         hints = []
         if size_hint_args:
-            hints.append(f"scale {size_hint_args[0]}-{size_hint_args[1]}\"/px")
+            hints.append(f"scale {size_hint_args[0]:.2f}-{size_hint_args[1]:.2f}\"/px")
         if position_hint_args:
             hints.append(f"pos ({position_hint_args[0]:.1f}, {position_hint_args[1]:.1f}) r={position_hint_args[2]:.1f}")
         print(f"  Hints: {', '.join(hints)}")
 
-    # Pre-filter index files to matching scales
+    # Pre-filter index files to matching scales, then sort by sky region priority
     all_count = len(index_files)
     index_files = _filter_index_files(index_files, width, height,
                                       size_hint_args[0] if size_hint_args else None,
                                       size_hint_args[1] if size_hint_args else None)
+    index_files = _sort_index_files_by_priority(index_files)
     if len(index_files) < all_count:
         parsed = [_parse_index_file(f) for f in index_files]
         series_counts = {}

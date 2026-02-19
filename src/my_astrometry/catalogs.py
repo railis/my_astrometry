@@ -42,8 +42,8 @@ _COMMON_ALIASES = {
 def lookup_object(
     name: str,
     openngc_path: pathlib.Path | None = None,
-) -> tuple[float, float, str] | None:
-    """Look up an object by name and return (ra_deg, dec_deg, canonical_name).
+) -> tuple[float, float, str, float | None] | None:
+    """Look up an object by name and return (ra_deg, dec_deg, canonical_name, major_axis_arcmin).
 
     Accepts formats like: M42, m42, NGC1976, ngc 1976, IC434, ic 434,
     or common names like "orion nebula", "crab".
@@ -66,7 +66,7 @@ def lookup_object(
                 display = canon
                 if obj.get("common_name"):
                     display += f" ({obj['common_name']})"
-                return obj["ra_deg"], obj["dec_deg"], display
+                return obj["ra_deg"], obj["dec_deg"], display, obj.get("major_axis_arcmin")
 
     # Try NGC/IC from OpenNGC
     if openngc_path and openngc_path.exists():
@@ -82,7 +82,7 @@ def lookup_object(
                     display = target
                     if obj.get("messier"):
                         display = f"{obj['messier']} ({target})"
-                    return obj["ra_deg"], obj["dec_deg"], display
+                    return obj["ra_deg"], obj["dec_deg"], display, obj.get("major_axis_arcmin")
 
     return None
 

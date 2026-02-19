@@ -1,4 +1,4 @@
-CLAUDE.md
+.gitignore
 LICENSE
 README.md
 pyproject.toml

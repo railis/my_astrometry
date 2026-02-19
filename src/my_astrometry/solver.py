@@ -164,7 +164,7 @@ def solve(
     ra_hint: float | None = None,
     dec_hint: float | None = None,
     radius_hint: float | None = None,
-    max_stars: int = 200,
+    max_stars: int = 1000,
     verbose: bool = False,
     parity: str = "both",
     use_exif: bool = True,

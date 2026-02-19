@@ -95,8 +95,8 @@ def main() -> None:
     solve_parser.add_argument(
         "--max-stars",
         type=int,
-        default=200,
-        help="Maximum number of stars to detect (default: 200).",
+        default=1000,
+        help="Maximum number of stars to detect (default: 1000).",
     )
     solve_parser.add_argument(
         "--parity",

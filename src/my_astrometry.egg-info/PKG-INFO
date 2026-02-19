@@ -10,4 +10,5 @@ Requires-Dist: astropy>=5.0
 Requires-Dist: numpy>=1.24
 Requires-Dist: Pillow>=9.0
 Requires-Dist: matplotlib>=3.6
+Requires-Dist: scipy>=1.10
 Dynamic: license-file

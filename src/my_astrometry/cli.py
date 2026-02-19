@@ -115,6 +115,12 @@ def main() -> None:
         help="Don't save WCS solution to image EXIF.",
     )
     solve_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel solver processes (default: 1). Higher values split index files across processes for faster blind solving.",
+    )
+    solve_parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Print detailed progress information.",
@@ -239,6 +245,7 @@ def _cmd_solve(args: argparse.Namespace) -> None:
             verbose=args.verbose,
             parity=args.parity,
             use_exif=not args.no_exif_scale,
+            workers=args.workers,
         )
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)

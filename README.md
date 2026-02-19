@@ -139,7 +139,8 @@ my-astrometry solve photo.jpg --object m42 --scale-low 1.0 --scale-high 2.0
 
 | Option | Description |
 |--------|-------------|
-| `--max-stars N` | Maximum number of stars to detect (default: 200). Increase for dense fields, decrease for speed |
+| `--workers N` | Number of parallel solver processes (default: 1). Splits index files across N processes for faster blind solving. Recommended: 4-8 for machines with many cores |
+| `--max-stars N` | Maximum number of stars to detect (default: 1000). Increase for dense fields, decrease for speed |
 | `--parity {both,normal,flip}` | Image parity. Set to `normal` for a ~2x speedup if you know your image is not mirrored. Default: `both` |
 | `--no-exif-scale` | Disable automatic plate scale estimation from camera EXIF data (focal length, sensor size) |
 | `--no-save-exif` | Solve the image but don't write the WCS solution to its EXIF. Useful for read-only files or when you just want the coordinates printed |

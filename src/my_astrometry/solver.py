@@ -1,6 +1,7 @@
 """Star detection and plate solving pipeline."""
 
 import math
+import multiprocessing
 import pathlib
 import re
 import time
@@ -156,6 +157,146 @@ def detect_stars(
     return np.column_stack([objects["x"], objects["y"]])
 
 
+def _solve_worker(
+    index_files: list[pathlib.Path],
+    stars: np.ndarray,
+    size_hint_args: tuple[float, float] | None,
+    position_hint_args: tuple[float, float, float] | None,
+    parity: str,
+    worker_id: int,
+    result_queue: multiprocessing.Queue,
+    cancel_event: multiprocessing.Event,
+) -> None:
+    """Solver worker for parallel solving. Runs in a subprocess.
+
+    Each worker gets a round-robin subset of index files and processes
+    all star slices on its subset.
+    """
+    import astrometry
+
+    parity_map = {
+        "both": astrometry.Parity.BOTH,
+        "normal": astrometry.Parity.NORMAL,
+        "flip": astrometry.Parity.FLIP,
+    }
+
+    size_hint = None
+    if size_hint_args is not None:
+        size_hint = astrometry.SizeHint(
+            lower_arcsec_per_pixel=size_hint_args[0],
+            upper_arcsec_per_pixel=size_hint_args[1],
+        )
+
+    position_hint = None
+    if position_hint_args is not None:
+        position_hint = astrometry.PositionHint(
+            ra_deg=position_hint_args[0],
+            dec_deg=position_hint_args[1],
+            radius_deg=position_hint_args[2],
+        )
+
+    def logodds_callback(logodds_list):
+        if cancel_event.is_set():
+            return astrometry.Action.STOP
+        if logodds_list[0] > 20.0:
+            return astrometry.Action.STOP
+        return astrometry.Action.CONTINUE
+
+    solution_parameters = astrometry.SolutionParameters(
+        parity=parity_map[parity],
+        logodds_callback=logodds_callback,
+    )
+
+    try:
+        with astrometry.Solver(index_files) as solver:
+            solution = solver.solve(
+                stars=stars,
+                size_hint=size_hint,
+                position_hint=position_hint,
+                solution_parameters=solution_parameters,
+            )
+
+        if solution.has_match():
+            match = solution.best_match()
+            result_queue.put({
+                "worker_id": worker_id,
+                "wcs_header": dict(match.astropy_wcs().to_header(relax=True)),
+                "center_ra_deg": match.center_ra_deg,
+                "center_dec_deg": match.center_dec_deg,
+                "scale_arcsec_per_pixel": match.scale_arcsec_per_pixel,
+                "logodds": match.logodds,
+            })
+    except Exception:
+        pass  # Worker failed silently; main process handles timeout
+
+
+def _solve_parallel(
+    index_files: list[pathlib.Path],
+    stars: np.ndarray,
+    size_hint_args: tuple[float, float] | None,
+    position_hint_args: tuple[float, float, float] | None,
+    parity: str,
+    workers: int,
+) -> dict | None:
+    """Run plate solving across multiple processes with round-robin file distribution.
+
+    Index files are distributed round-robin so each worker gets a mix of
+    scales and sky regions. Each worker processes all star slices on its
+    subset of files.
+
+    Returns the result dict from the first worker to find a match, or None.
+    """
+    # Round-robin distribution: worker i gets files i, i+N, i+2N, ...
+    file_chunks: list[list[pathlib.Path]] = [[] for _ in range(workers)]
+    for i, f in enumerate(index_files):
+        file_chunks[i % workers].append(f)
+
+    result_queue = multiprocessing.Queue()
+    cancel_event = multiprocessing.Event()
+
+    processes = []
+    for i in range(workers):
+        if not file_chunks[i]:
+            continue
+        p = multiprocessing.Process(
+            target=_solve_worker,
+            args=(
+                file_chunks[i], stars, size_hint_args, position_hint_args,
+                parity, i, result_queue, cancel_event,
+            ),
+        )
+        processes.append(p)
+
+    for p in processes:
+        p.start()
+
+    # Wait for first result or all processes to finish
+    result = None
+    alive = set(range(len(processes)))
+    while alive:
+        try:
+            result = result_queue.get(timeout=0.5)
+            break
+        except Exception:
+            pass
+        for i in list(alive):
+            if not processes[i].is_alive():
+                alive.discard(i)
+
+    # Signal remaining workers to stop and terminate them
+    cancel_event.set()
+    for p in processes:
+        p.join(timeout=2.0)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=2.0)
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=1.0)
+
+    return result
+
+
 def solve(
     image_path: str | pathlib.Path,
     index_dir: pathlib.Path,
@@ -168,6 +309,7 @@ def solve(
     verbose: bool = False,
     parity: str = "both",
     use_exif: bool = True,
+    workers: int = 1,
 ) -> tuple[WCS, dict]:
     """Plate-solve an image.
 
@@ -183,6 +325,7 @@ def solve(
         verbose: Print progress info.
         parity: Image parity - "both", "normal", or "flip".
         use_exif: Try to auto-detect plate scale from EXIF data.
+        workers: Number of parallel solver processes (1 = single-process).
 
     Returns:
         Tuple of (WCS object, metadata dict with center_ra, center_dec, scale, logodds).
@@ -224,33 +367,28 @@ def solve(
             scale_low, scale_high = exif_scale
             print(f"  EXIF auto-detected scale: {scale_low:.2f}-{scale_high:.2f} arcsec/px")
 
-    # Build hints
-    size_hint = None
+    # Build hints (as plain tuples for pickling to worker processes)
+    size_hint_args = None
     if scale_low is not None or scale_high is not None:
-        size_hint = astrometry.SizeHint(
-            lower_arcsec_per_pixel=scale_low or 0.1,
-            upper_arcsec_per_pixel=scale_high or 1000.0,
-        )
+        size_hint_args = (scale_low or 0.1, scale_high or 1000.0)
 
-    position_hint = None
+    position_hint_args = None
     if ra_hint is not None and dec_hint is not None:
-        position_hint = astrometry.PositionHint(
-            ra_deg=ra_hint,
-            dec_deg=dec_hint,
-            radius_deg=radius_hint or 10.0,
-        )
+        position_hint_args = (ra_hint, dec_hint, radius_hint or 10.0)
 
-    if size_hint or position_hint:
+    if size_hint_args or position_hint_args:
         hints = []
-        if size_hint:
-            hints.append(f"scale {size_hint.lower_arcsec_per_pixel}-{size_hint.upper_arcsec_per_pixel}\"/px")
-        if position_hint:
-            hints.append(f"pos ({position_hint.ra_deg:.1f}, {position_hint.dec_deg:.1f}) r={position_hint.radius_deg:.1f}")
+        if size_hint_args:
+            hints.append(f"scale {size_hint_args[0]}-{size_hint_args[1]}\"/px")
+        if position_hint_args:
+            hints.append(f"pos ({position_hint_args[0]:.1f}, {position_hint_args[1]:.1f}) r={position_hint_args[2]:.1f}")
         print(f"  Hints: {', '.join(hints)}")
 
     # Pre-filter index files to matching scales
     all_count = len(index_files)
-    index_files = _filter_index_files(index_files, width, height, scale_low, scale_high)
+    index_files = _filter_index_files(index_files, width, height,
+                                      size_hint_args[0] if size_hint_args else None,
+                                      size_hint_args[1] if size_hint_args else None)
     if len(index_files) < all_count:
         parsed = [_parse_index_file(f) for f in index_files]
         series_counts = {}
@@ -262,9 +400,49 @@ def solve(
 
     if verbose:
         import logging
-
         logging.getLogger().setLevel(logging.INFO)
 
+    effective_workers = min(workers, len(index_files))
+
+    if effective_workers > 1:
+        print(f"  Plate solving ({len(index_files)} index files, {effective_workers} workers)...")
+        t0 = time.monotonic()
+
+        result = _solve_parallel(
+            index_files, stars, size_hint_args, position_hint_args,
+            parity, effective_workers,
+        )
+        solve_time = time.monotonic() - t0
+
+        if result is None:
+            print(f"  Failed after {solve_time:.1f}s")
+            raise RuntimeError(
+                "Plate solving failed — no match found. "
+                "Try providing scale hints (--scale-low, --scale-high) "
+                "or position hints (--ra, --dec, --radius)."
+            )
+
+        from astropy.io.fits import Header
+        header = Header()
+        for k, v in result["wcs_header"].items():
+            header[k] = v
+        wcs = WCS(header, relax=True)
+        total_time = time.monotonic() - t_total
+        metadata = {
+            "center_ra_deg": result["center_ra_deg"],
+            "center_dec_deg": result["center_dec_deg"],
+            "scale_arcsec_per_pixel": result["scale_arcsec_per_pixel"],
+            "logodds": result["logodds"],
+            "image_width": width,
+            "image_height": height,
+            "num_stars_detected": len(stars),
+            "solve_time_s": solve_time,
+            "total_time_s": total_time,
+        }
+        print(f"  Solved in {solve_time:.1f}s (total {total_time:.1f}s, worker {result['worker_id']})")
+        return wcs, metadata
+
+    # Single-process path (workers=1)
     parity_map = {
         "both": astrometry.Parity.BOTH,
         "normal": astrometry.Parity.NORMAL,
@@ -285,8 +463,15 @@ def solve(
     with astrometry.Solver(index_files) as solver:
         solution = solver.solve(
             stars=stars,
-            size_hint=size_hint,
-            position_hint=position_hint,
+            size_hint=size_hint_args and astrometry.SizeHint(
+                lower_arcsec_per_pixel=size_hint_args[0],
+                upper_arcsec_per_pixel=size_hint_args[1],
+            ),
+            position_hint=position_hint_args and astrometry.PositionHint(
+                ra_deg=position_hint_args[0],
+                dec_deg=position_hint_args[1],
+                radius_deg=position_hint_args[2],
+            ),
             solution_parameters=solution_parameters,
         )
 
